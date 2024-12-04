@@ -1,15 +1,10 @@
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
-import java.lang.reflect.Array;
+import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.stream.Stream;
 
 public class Main {
   private final static int PORT = 4221;
@@ -20,11 +15,10 @@ public class Main {
   private final static String NOT_FOUND = "404 Not Found";
 
   private final static String USER_AGENT = "user-agent";
+  private static String[] serverArgs;
 
   public static void main(String[] args) {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    System.out.println("Logs from your program will appear here!");
-
+    serverArgs = args;
     try (ServerSocket serverSocket = new ServerSocket(PORT); ExecutorService executor = Executors.newFixedThreadPool(THREAD_POOL_SIZE)) {
       // Since the tester restarts your program quite often, setting SO_REUSEADDR
       // ensures that we don't run into 'Address already in use' errors
@@ -53,7 +47,7 @@ public class Main {
       String[] requestHTTPTokens = requestLine.split(" ");
       Map<String, String> headers = new HashMap<>();
       String nextLine;
-      while((nextLine = socketReadBuffer.readLine()) != null) {
+      while ((nextLine = socketReadBuffer.readLine()) != null) {
         if (nextLine.isEmpty()) {
           break;
         }
@@ -72,6 +66,8 @@ public class Main {
           socketWriter.println(handleEchoPath(path));
         } else if (path.equals("/user-agent")) {
           socketWriter.println(returnHeader(headers, USER_AGENT));
+        } else if (path.startsWith("/files")) {
+          socketWriter.println(returnFileContent(path));
         } else {
           socketWriter.println(RESPONSE_VERSION + NOT_FOUND + "\r\n\r\n");
         }
@@ -110,5 +106,35 @@ public class Main {
       return respBuilder;
     }
     throw new IOException("User Agent Path request received without user-agent header");
+  }
+
+  public static StringBuilder returnFileContent(final String path) throws IOException {
+    final String[] filePath = path.split("/files/");
+    if (filePath.length == 2) {
+      final String filename = filePath[1];
+      StringBuilder respBuilder = new StringBuilder();
+      File file = new File(getBasePath(), filename);
+      if (file.exists()) {
+        byte[] fileData = Files.readAllBytes(file.toPath());
+        String[] headers = {"Content-Type: application/octet-stream", "Content-Length: " + fileData.length};
+        respBuilder.append(RESPONSE_VERSION).append(SUCCESS).append("\r\n");
+        for (final String header : headers) {
+          respBuilder.append(header).append("\r\n");
+        }
+        return respBuilder.append("\r\n").append(new String(fileData));
+      } else {
+        return respBuilder.append(RESPONSE_VERSION).append(NOT_FOUND).append("\r\n\r\n");
+      }
+    }
+    throw new IOException("File path is malformed");
+  }
+
+  private static String getBasePath() {
+    for (int i = 0; i < serverArgs.length; ++i) {
+      if (serverArgs[i].equals("--directory") && i + 1 < serverArgs.length) {
+        return serverArgs[i + 1];
+      }
+    }
+    return "/tmp/";
   }
 }
