@@ -2,6 +2,7 @@ import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -13,8 +14,13 @@ public class Main {
   private final static String RESPONSE_VERSION = "HTTP/1.1 ";
   private final static String SUCCESS = "200 OK";
   private final static String NOT_FOUND = "404 Not Found";
+  private final static String CREATED = "201 Created";
+
+  private static final String POST = "POST";
+  private static final String GET = "GET";
 
   private final static String USER_AGENT = "user-agent";
+  private final static String CONTENT_LENGTH = "content-length";
   private static String[] serverArgs;
 
   public static void main(String[] args) {
@@ -59,6 +65,16 @@ public class Main {
       System.out.println("Request received: " + Arrays.toString(requestHTTPTokens) + "\n" + headers);
 
       if (requestHTTPTokens.length == 3) {
+        String reqBody = null;
+        if (requestHTTPTokens[0].equals(POST)) {
+          if (headers.get(CONTENT_LENGTH) == null) {
+            throw new IOException("POST requests must send a content-length header");
+          }
+          int reqBodySize = Integer.parseInt(headers.get(CONTENT_LENGTH));
+          char[] reqBodyBuffer = new char[reqBodySize];
+          socketReadBuffer.read(reqBodyBuffer, 0, reqBodySize);
+          reqBody = new String(reqBodyBuffer);
+        }
         final String path = requestHTTPTokens[1];
         if (path.equals("/")) {
           socketWriter.println(RESPONSE_VERSION + SUCCESS + "\r\n\r\n");
@@ -67,7 +83,11 @@ public class Main {
         } else if (path.equals("/user-agent")) {
           socketWriter.println(returnHeader(headers, USER_AGENT));
         } else if (path.startsWith("/files")) {
-          socketWriter.println(returnFileContent(path));
+          if (requestHTTPTokens[0].equals(GET)) {
+            socketWriter.println(returnFileContent(path));
+          } else if (requestHTTPTokens[0].equals(POST)) {
+            socketWriter.println(createFile(path, reqBody));
+          }
         } else {
           socketWriter.println(RESPONSE_VERSION + NOT_FOUND + "\r\n\r\n");
         }
@@ -81,15 +101,16 @@ public class Main {
   }
 
   public static StringBuilder handleEchoPath(final String path) throws IOException {
-    final String[] echoResp = path.split("/echo/");
-    if (echoResp.length == 2) {
-      String[] headers = {"Content-Type: text/plain", "Content-Length: " + echoResp[1].length()};
+    final String[] echoRespSplit = path.split("/echo/");
+    if (echoRespSplit.length == 2) {
+      final String echoResp = echoRespSplit[1];
+      String[] headers = {"Content-Type: text/plain", "Content-Length: " + echoResp.length()};
       StringBuilder respBuilder = new StringBuilder();
       respBuilder.append(RESPONSE_VERSION).append(SUCCESS).append("\r\n");
       for (final String header : headers) {
         respBuilder.append(header).append("\r\n");
       }
-      return respBuilder.append("\r\n").append(echoResp[1]);
+      return respBuilder.append("\r\n").append(echoResp);
     }
     throw new IOException("Echo path is malformed");
   }
@@ -109,9 +130,9 @@ public class Main {
   }
 
   public static StringBuilder returnFileContent(final String path) throws IOException {
-    final String[] filePath = path.split("/files/");
-    if (filePath.length == 2) {
-      final String filename = filePath[1];
+    final String[] filePathSplit = path.split("/files/");
+    if (filePathSplit.length == 2) {
+      final String filename = filePathSplit[1];
       StringBuilder respBuilder = new StringBuilder();
       File file = new File(getBasePath(), filename);
       if (file.exists()) {
@@ -125,6 +146,21 @@ public class Main {
       } else {
         return respBuilder.append(RESPONSE_VERSION).append(NOT_FOUND).append("\r\n\r\n");
       }
+    }
+    throw new IOException("File path is malformed");
+  }
+  
+  public static StringBuilder createFile(final String path, final String reqBody) throws IOException {
+    final String[] filePathSplit = path.split("/files/");
+    if (filePathSplit.length == 2) {
+      final String filename = filePathSplit[1];
+      StringBuilder respBuilder = new StringBuilder();
+      File file = new File(getBasePath(), filename);
+      if (!file.exists()) {
+        Files.createFile(Path.of(getBasePath() + filename));
+      }
+      Files.writeString(file.toPath(), reqBody);
+      return respBuilder.append(RESPONSE_VERSION).append(CREATED).append("\r\n\r\n");
     }
     throw new IOException("File path is malformed");
   }
