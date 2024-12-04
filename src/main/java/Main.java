@@ -34,9 +34,9 @@ public class Main {
     String httpVersion;
     String respStatus;
     Map<String, String> respHeaders;
-    String respBody;
+    byte[] respBody;
 
-    ResponseBody(String version, String status, Map<String, String> headers, String response) {
+    ResponseBody(String version, String status, Map<String, String> headers, byte[] response) {
       this.httpVersion = version;
       this.respStatus = status;
       this.respHeaders = headers;
@@ -64,7 +64,9 @@ public class Main {
   }
 
   public static void handleIncomingConnection(Socket clientSocket) {
-    try (BufferedReader socketReadBuffer = new BufferedReader(new InputStreamReader(clientSocket.getInputStream())); PrintWriter socketWriter = new PrintWriter(clientSocket.getOutputStream(), true)) {
+    try (BufferedReader socketReadBuffer = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+         OutputStream socketOutputStream = clientSocket.getOutputStream();
+         PrintWriter socketWriter = new PrintWriter(socketOutputStream, true)) {
       String requestLine = socketReadBuffer.readLine();
       if (requestLine == null) {
         System.out.println("Received preflight / handshake request. Closing socket " + clientSocket.getRemoteSocketAddress());
@@ -100,18 +102,14 @@ public class Main {
         if (path.equals("/")) {
           socketWriter.println(RESPONSE_VERSION + SUCCESS + "\r\n\r\n");
         } else if (path.startsWith("/echo/")) {
-          final String response = createResponse(headers, reqBody, handleEchoPath(path));
-          socketWriter.println(response);
+          sendResponse(headers, reqBody, handleEchoPath(path), clientSocket.getOutputStream());
         } else if (path.equals("/user-agent")) {
-          final String response = createResponse(headers, reqBody, returnHeader(headers, USER_AGENT));
-          socketWriter.println(response);
+          sendResponse(headers, reqBody, returnHeader(headers, USER_AGENT), socketOutputStream);
         } else if (path.startsWith("/files/")) {
           if (requestHTTPTokens[0].equals(GET)) {
-            final String response = createResponse(headers, reqBody, returnFileContent(path));
-            socketWriter.println(response);
+            sendResponse(headers, reqBody, returnFileContent(path), socketOutputStream);
           } else if (requestHTTPTokens[0].equals(POST)) {
-            final String response = createResponse(headers, reqBody, createFile(path, reqBody));
-            socketWriter.println(response);
+            sendResponse(headers, reqBody, createFile(path, reqBody), socketOutputStream);
           }
         } else {
           socketWriter.println(RESPONSE_VERSION + NOT_FOUND + "\r\n\r\n");
@@ -129,14 +127,14 @@ public class Main {
     final String echoResp = path.substring(6);
     Map<String, String> headers = new HashMap<>();
     headers.put(CONTENT_TYPE, "text/plain");
-    return new ResponseBody(RESPONSE_VERSION, SUCCESS, headers, echoResp);
+    return new ResponseBody(RESPONSE_VERSION, SUCCESS, headers, echoResp.getBytes());
   }
 
   public static ResponseBody returnHeader(final Map<String, String> headerMap, final String respHeader) throws IOException {
     if (headerMap.get(respHeader) != null) {
       Map<String, String> headers = new HashMap<>();
       headers.put(CONTENT_TYPE, "text/plain");
-      return new ResponseBody(RESPONSE_VERSION, SUCCESS, headers, headerMap.get(respHeader));
+      return new ResponseBody(RESPONSE_VERSION, SUCCESS, headers, headerMap.get(respHeader).getBytes());
     }
     throw new IOException("User Agent Path request received without user-agent header");
   }
@@ -149,9 +147,9 @@ public class Main {
         byte[] fileData = Files.readAllBytes(file.toPath());
         Map<String, String> headers = new HashMap<>();
         headers.put(CONTENT_TYPE, "application/octet-stream");
-        return new ResponseBody(RESPONSE_VERSION, SUCCESS, headers, new String(fileData));
+        return new ResponseBody(RESPONSE_VERSION, SUCCESS, headers, new String(fileData).getBytes());
       } else {
-        return new ResponseBody(RESPONSE_VERSION, NOT_FOUND, null, "");
+        return new ResponseBody(RESPONSE_VERSION, NOT_FOUND, null, "".getBytes());
       }
     }
     throw new IOException("File path is malformed");
@@ -165,7 +163,7 @@ public class Main {
         Files.createFile(Path.of(getBasePath() + filename));
       }
       Files.writeString(file.toPath(), reqBody);
-      return new ResponseBody(RESPONSE_VERSION, CREATED, null, "");
+      return new ResponseBody(RESPONSE_VERSION, CREATED, null, "".getBytes());
     }
     throw new IOException("File path is malformed");
   }
@@ -179,7 +177,7 @@ public class Main {
     return "/tmp/";
   }
 
-  private static String createResponse(Map<String, String> reqHeaderMap, String reqBody, ResponseBody response) throws IOException {
+  private static void sendResponse(Map<String, String> reqHeaderMap, String reqBody, ResponseBody response, OutputStream socketWriter) throws IOException {
     final String acceptEncoding = reqHeaderMap.get(ACCEPT_ENCODING);
     if (response.respHeaders == null) {
       response.respHeaders = new HashMap<>();
@@ -191,19 +189,22 @@ public class Main {
       String respEncoding = Arrays.stream(encodings).filter(supportedEncodings::contains).findFirst().orElse(null);
       if (respEncoding != null) {
         response.respHeaders.put(CONTENT_ENCODING, respEncoding);
-//        if (respEncoding.equalsIgnoreCase("gzip")) {
-//          var responseBuffer = new ByteArrayOutputStream(response.respBody.length());
-//          var compressor = new GZIPOutputStream(responseBuffer);
-//          System.out.println("Response size before compression: " + response.respBody.length());
-//          compressor.write(response.respBody.getBytes(StandardCharsets.UTF_8));
-//          response.respBody = responseBuffer.toString();
-//          System.out.println("Response size after compression: " + response.respBody.length());
-//        }
+        if (respEncoding.equalsIgnoreCase("gzip")) {
+          try (var responseBuffer = new ByteArrayOutputStream();
+               var compressor = new GZIPOutputStream(responseBuffer)) {
+            System.out.println("Response size before compression: " + response.respBody.length);
+            compressor.write(response.respBody);
+            compressor.finish();
+            response.respBody = responseBuffer.toByteArray();
+            System.out.println("Response size after compression: " + response.respBody.length);
+          }
+        }
       }
     }
-    response.respHeaders.put(CONTENT_LENGTH, String.valueOf(response.respBody.length()));
-    System.out.println(response.httpVersion + response.respStatus + "\r\n" + getHeaderString(response.respHeaders) + "\r\n" + response.respBody);
-    return response.httpVersion + response.respStatus + "\r\n" + getHeaderString(response.respHeaders) + "\r\n" + response.respBody;
+    response.respHeaders.put(CONTENT_LENGTH, String.valueOf(response.respBody.length));
+    System.out.println(response.httpVersion + response.respStatus + "\r\n" + getHeaderString(response.respHeaders) + "\r\n" + Arrays.toString(response.respBody));
+    socketWriter.write((response.httpVersion + response.respStatus + "\r\n" + getHeaderString(response.respHeaders) + "\r\n").getBytes());
+    socketWriter.write(response.respBody);
   }
 
   private static StringBuilder getHeaderString(Map<String, String> headers) {
